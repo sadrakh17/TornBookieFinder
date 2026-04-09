@@ -45,7 +45,7 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
-import requests
+import httpx
 from aiohttp import web
 from anthropic import Anthropic
 from dotenv import load_dotenv
@@ -264,52 +264,52 @@ def db_save_report(period: str, summary: str):
 
 
 # =============================================================================
-# ODDS API
+# ODDS API  — all async with httpx so they never block the event loop
 # =============================================================================
 
-def fetch_sports() -> list:
+async def fetch_sports() -> list:
     try:
-        r = requests.get(
-            f"{ODDS_API_BASE}/sports",
-            params={"apiKey": ODDS_API_KEY},
-            timeout=10,
-        )
-        r.raise_for_status()
-        return r.json()
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(
+                f"{ODDS_API_BASE}/sports",
+                params={"apiKey": ODDS_API_KEY},
+            )
+            r.raise_for_status()
+            return r.json()
     except Exception as e:
         logger.error(f"fetch_sports: {e}")
         return []
 
 
-def fetch_odds(sport_key: str) -> list:
+async def fetch_odds(sport_key: str) -> list:
     try:
-        r = requests.get(
-            f"{ODDS_API_BASE}/sports/{sport_key}/odds",
-            params={
-                "apiKey":     ODDS_API_KEY,
-                "regions":    "us,uk,eu",
-                "markets":    "h2h",
-                "oddsFormat": "decimal",
-                "dateFormat": "iso",
-            },
-            timeout=15,
-        )
-        r.raise_for_status()
-        return r.json()
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(
+                f"{ODDS_API_BASE}/sports/{sport_key}/odds",
+                params={
+                    "apiKey":     ODDS_API_KEY,
+                    "regions":    "us,uk,eu",
+                    "markets":    "h2h",
+                    "oddsFormat": "decimal",
+                    "dateFormat": "iso",
+                },
+            )
+            r.raise_for_status()
+            return r.json()
     except Exception as e:
         logger.error(f"fetch_odds({sport_key}): {e}")
         return []
 
 
-def fetch_scores(sport_key: str, days_from: int = 7) -> list:
+async def fetch_scores(sport_key: str, days_from: int = 7) -> list:
     try:
-        r = requests.get(
-            f"{ODDS_API_BASE}/sports/{sport_key}/scores",
-            params={"apiKey": ODDS_API_KEY, "daysFrom": days_from},
-            timeout=10,
-        )
-        r.raise_for_status()
-        return r.json()
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(
+                f"{ODDS_API_BASE}/sports/{sport_key}/scores",
+                params={"apiKey": ODDS_API_KEY, "daysFrom": days_from},
+            )
+            r.raise_for_status()
+            return r.json()
     except Exception as e:
         logger.error(f"fetch_scores({sport_key}): {e}")
         return []
@@ -360,12 +360,9 @@ def preprocess_events(events: list, limit: int = 50) -> list:
     return out
 
 
-def discover_torn_sports() -> list[tuple[str, str]]:
-    """
-    Dynamically fetch ALL active sports from the Odds API and filter to
-    those matching Torn City Bookie's offerings. Returns [(key, title), ...].
-    """
-    raw = fetch_sports()
+async def discover_torn_sports() -> list[tuple[str, str]]:
+    """Dynamically fetch ALL active sports and filter to Torn-compatible ones."""
+    raw = await fetch_sports()
     found, seen = [], set()
     for s in raw:
         if not s.get("active"):
@@ -449,8 +446,11 @@ Use Telegram Markdown (*bold* _italic_). Follow this exact structure:
 9. *Verdict* — direct answer: should the user keep following this bot?"""
 
 
-def claude_analyze(sport_key: str, sport_name: str, events: list) -> dict:
-    """Core Claude analysis call. Returns parsed dict with picks."""
+async def claude_analyze(sport_key: str, sport_name: str, events: list) -> dict:
+    """
+    Core Claude analysis. Runs the blocking Anthropic call in a thread executor
+    so it never freezes the async event loop while waiting for the API response.
+    """
     if not events:
         return {
             "picks": [],
@@ -464,34 +464,37 @@ def claude_analyze(sport_key: str, sport_name: str, events: list) -> dict:
         f"{json.dumps(events, indent=2)}\n\n"
         "Return ONLY the JSON schema from your system prompt. No other text."
     )
-    raw = ""
-    try:
-        resp = anthropic_client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=2000,
-            system=ANALYST_SYSTEM,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        raw = resp.content[0].text.strip()
-        # Strip accidental markdown fences
-        if raw.startswith("```"):
-            parts = raw.split("```")
-            raw = parts[1].lstrip("json").strip() if len(parts) > 1 else raw
-        result = json.loads(raw)
-        for pick in result.get("picks", []):
-            pick.setdefault("sport_key", sport_key)
-            pick.setdefault("sport_name", sport_name)
-        return result
-    except json.JSONDecodeError as e:
-        logger.error(f"Claude JSON fail: {e} | raw[:200]={raw[:200]}")
-        return {"error": str(e), "picks": [], "raw": raw[:300]}
-    except Exception as e:
-        logger.error(f"Claude API error: {e}")
-        return {"error": str(e), "picks": []}
+
+    def _blocking_call():
+        raw = ""
+        try:
+            resp = anthropic_client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=2000,
+                system=ANALYST_SYSTEM,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            raw = resp.content[0].text.strip()
+            if raw.startswith("```"):
+                parts = raw.split("```")
+                raw = parts[1].lstrip("json").strip() if len(parts) > 1 else raw
+            result = json.loads(raw)
+            for pick in result.get("picks", []):
+                pick.setdefault("sport_key", sport_key)
+                pick.setdefault("sport_name", sport_name)
+            return result
+        except json.JSONDecodeError as e:
+            logger.error(f"Claude JSON fail: {e} | raw[:200]={raw[:200]}")
+            return {"error": str(e), "picks": [], "raw": raw[:300]}
+        except Exception as e:
+            logger.error(f"Claude API error: {e}")
+            return {"error": str(e), "picks": []}
+
+    return await asyncio.get_event_loop().run_in_executor(None, _blocking_call)
 
 
-def claude_report(rows: list, period_label: str) -> str:
-    """Generate a performance report via Claude."""
+async def claude_report(rows: list, period_label: str) -> str:
+    """Generate a performance report via Claude — runs in executor to avoid blocking."""
     resolved = [r for r in rows if r["status"] in ("WON", "LOST")]
     wins     = [r for r in resolved if r["status"] == "WON"]
     losses   = [r for r in resolved if r["status"] == "LOST"]
@@ -553,24 +556,28 @@ def claude_report(rows: list, period_label: str) -> str:
         f"STATS:\n{json.dumps(stats, indent=2)}\n\n"
         f"TOP RESOLVED BETS:\n{json.dumps(sample, indent=2)}"
     )
-    try:
-        resp = anthropic_client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=2500,
-            system=REPORT_SYSTEM,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return resp.content[0].text.strip()
-    except Exception as e:
-        logger.error(f"Claude report error: {e}")
-        return f"Report generation failed: {e}"
+
+    def _blocking_call():
+        try:
+            resp = anthropic_client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=2500,
+                system=REPORT_SYSTEM,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return resp.content[0].text.strip()
+        except Exception as e:
+            logger.error(f"Claude report error: {e}")
+            return f"Report generation failed: {e}"
+
+    return await asyncio.get_event_loop().run_in_executor(None, _blocking_call)
 
 
 # =============================================================================
 # BET RESOLUTION
 # =============================================================================
 
-def resolve_pending_bets() -> dict:
+async def resolve_pending_bets() -> dict:
     """Fetch scores for all sports with PENDING bets and resolve them."""
     pending = db_get_pending()
     if not pending:
@@ -584,7 +591,7 @@ def resolve_pending_bets() -> dict:
     still_pending  = 0
 
     for sport_key, sport_rows in by_sport.items():
-        scores    = fetch_scores(sport_key, days_from=7)
+        scores    = await fetch_scores(sport_key, days_from=7)
         completed = {g["id"]: g for g in scores if g.get("completed")}
 
         for row in sport_rows:
@@ -723,7 +730,7 @@ async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("🔍 Scanning active sports markets...")
-    sports = discover_torn_sports()
+    sports = await discover_torn_sports()
     if not sports:
         await msg.edit_text(
             "❌ No active Torn\\-compatible sports right now\\.",
@@ -758,31 +765,64 @@ async def cmd_recommend(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _do_recommend(msg):
-    """Shared logic for /recommend and the inline recommend button."""
-    all_picks     = []
-    all_summaries = []
-    events_scanned = 0
+    """
+    Fetch odds for all priority sports concurrently, then run all Claude
+    analyses concurrently. Total time ≈ slowest single API call, not their sum.
+    """
+    await msg.edit_text(
+        "🧠 *Fetching live odds for all priority sports\\.\\.\\.*",
+        parse_mode="MarkdownV2",
+    )
 
-    for sport_key in PRIORITY_SPORTS:
-        raw = fetch_odds(sport_key)
-        if not raw:
+    # Fetch all sports simultaneously
+    raw_results = await asyncio.gather(
+        *[fetch_odds(sk) for sk in PRIORITY_SPORTS],
+        return_exceptions=True,
+    )
+
+    # Preprocess
+    sports_to_analyze = []
+    events_scanned = 0
+    for sport_key, raw in zip(PRIORITY_SPORTS, raw_results):
+        if isinstance(raw, Exception) or not raw:
             continue
         events = preprocess_events(raw, limit=8)
         if not events:
             continue
-
         sport_name = TORN_SPORTS.get(sport_key, sport_key)
         events_scanned += len(events)
+        sports_to_analyze.append((sport_key, sport_name, events))
 
+    if not sports_to_analyze:
         await msg.edit_text(
-            f"🧠 *Analyzing {_escape_md(sport_name)} \\({len(events)} events\\)\\.\\.\\.*",
+            "❌ No active events found\\. Markets may be closed\\.\n"
+            "Try /scan \\| Use /watchstart for continuous monitoring\\.",
             parse_mode="MarkdownV2",
         )
+        return
 
-        result  = claude_analyze(sport_key, sport_name, events)
+    sport_list = ", ".join(_escape_md(s[1]) for s in sports_to_analyze[:3])
+    more = "\\.\\.\\." if len(sports_to_analyze) > 3 else ""
+    await msg.edit_text(
+        f"🧠 *Claude analyzing {len(sports_to_analyze)} sports simultaneously\\.\\.\\.*\n"
+        f"_{sport_list}{more}_",
+        parse_mode="MarkdownV2",
+    )
+
+    # Analyze all sports simultaneously
+    analysis_results = await asyncio.gather(
+        *[claude_analyze(sk, sn, ev) for sk, sn, ev in sports_to_analyze],
+        return_exceptions=True,
+    )
+
+    all_picks     = []
+    all_summaries = []
+    for (sport_key, sport_name, _), result in zip(sports_to_analyze, analysis_results):
+        if isinstance(result, Exception):
+            logger.error(f"Analysis error {sport_key}: {result}")
+            continue
         picks   = result.get("picks", [])
         summary = result.get("analysis_summary", "")
-
         if picks:
             all_picks.extend(picks)
             if summary:
@@ -790,12 +830,9 @@ async def _do_recommend(msg):
                     f"*{_escape_md(sport_name)}:* {_escape_md(summary)}"
                 )
 
-        if len(all_picks) >= 5:
-            break
-
     if not all_picks:
         await msg.edit_text(
-            "❌ No value bets found right now\\. Markets may be closed or vig too high\\.\n"
+            "❌ No value bets found\\. Vig too high or markets closed\\.\n"
             "Try /scan \\| Use /watchstart for continuous monitoring\\.",
             parse_mode="MarkdownV2",
         )
@@ -861,7 +898,7 @@ async def _run_analysis(target, sport_key: str, sport_name: str):
         f"📡 Fetching *{_escape_md(sport_name)}* odds\\.\\.\\.",
         parse_mode="MarkdownV2",
     )
-    raw = fetch_odds(sport_key)
+    raw = await fetch_odds(sport_key)
     if not raw:
         await msg.edit_text(
             f"❌ No active events for *{_escape_md(sport_name)}*\\.",
@@ -875,7 +912,7 @@ async def _run_analysis(target, sport_key: str, sport_name: str):
         parse_mode="MarkdownV2",
     )
 
-    result     = claude_analyze(sport_key, sport_name, events)
+    result     = await claude_analyze(sport_key, sport_name, events)
     picks      = result.get("picks", [])
     skipped    = result.get("skipped_matches", [])
     summary    = result.get("analysis_summary", "")
@@ -937,7 +974,7 @@ async def cmd_resolve(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "⏳ *Fetching scores and resolving pending bets\\.\\.\\.*",
         parse_mode="MarkdownV2",
     )
-    result = resolve_pending_bets()
+    result = await resolve_pending_bets()
     r = result["resolved"]
     p = result["still_pending"]
     await msg.edit_text(
@@ -976,7 +1013,7 @@ async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     period_label = f"Last {days} days"
-    report_text  = claude_report(rows, period_label)
+    report_text  = await claude_report(rows, period_label)
     db_save_report(period_label, report_text)
 
     now    = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -1053,7 +1090,7 @@ async def cmd_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📡 Fetching *{_escape_md(sport_name)}* odds\\.\\.\\.",
             parse_mode="MarkdownV2",
         )
-        raw = fetch_odds(sport_key)
+        raw = await fetch_odds(sport_key)
         if not raw:
             await query.edit_message_text(
                 f"❌ No active events for *{_escape_md(sport_name)}*\\.",
@@ -1066,7 +1103,7 @@ async def cmd_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🧠 *Claude analyzing {len(events)} events\\.\\.\\.*",
             parse_mode="MarkdownV2",
         )
-        result  = claude_analyze(sport_key, sport_name, events)
+        result  = await claude_analyze(sport_key, sport_name, events)
         picks   = result.get("picks", [])
         saved   = db_save_picks(picks) if picks else 0
         summary = result.get("analysis_summary", "")
@@ -1185,7 +1222,7 @@ async def _scanner_loop(bot, chat_id: str, interval: int):
         cycle_alerts  = 0
 
         # Step 1: discover sports dynamically — catches new sports Torn adds
-        active_sports = discover_torn_sports()
+        active_sports = await discover_torn_sports()
         cycle_sports  = len(active_sports)
         logger.info(f"Scanner cycle: {cycle_sports} active sports")
 
@@ -1194,7 +1231,7 @@ async def _scanner_loop(bot, chat_id: str, interval: int):
                 break
 
             sport_name = TORN_SPORTS.get(sport_key, sport_title)
-            raw_events = fetch_odds(sport_key)
+            raw_events = await fetch_odds(sport_key)
             if not raw_events:
                 await asyncio.sleep(1)
                 continue
@@ -1216,7 +1253,7 @@ async def _scanner_loop(bot, chat_id: str, interval: int):
                 continue
 
             # Step 4: Claude analyzes new events
-            result = claude_analyze(sport_key, sport_name, new_events)
+            result = await claude_analyze(sport_key, sport_name, new_events)
             picks  = result.get("picks", [])
             if not picks:
                 await asyncio.sleep(1)
