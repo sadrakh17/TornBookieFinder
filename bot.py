@@ -382,51 +382,12 @@ async def discover_torn_sports() -> list[tuple[str, str]]:
 # CLAUDE CORE
 # =============================================================================
 
-ANALYST_SYSTEM = """You are Claude — the core analyst of the Torn City Bookie Analyzer bot.
+ANALYST_SYSTEM = """Sports betting analyst for Torn City Bookie. Identify VALUE BETS from odds data.
 
-Your task: analyze real-time sports odds and identify VALUE BETS for Torn City's Bookie.
+Rules: implied_prob=100/odds. HIGH confidence: bookmaker_count>=5,vig<5%,implied_prob>60%. MEDIUM: count>=3,vig<8%,prob 45-60%. LOW: otherwise. Max 3 picks. Skip if prob<30% or vig>10%.
 
-FRAMEWORK:
-- Implied probability = 100 / decimal_odds
-- Vig (overround) = sum of all implied probs - 100 (lower = fairer market)
-- Value bet = bookmaker's implied prob < true win probability
-- Sharp signal = high bookmaker_count consensus + clear odds gap between sides
-- Avoid: implied probs within 3% of each other (coin-flip), vig > 10%
-
-CONFIDENCE (apply strictly):
-- HIGH:   bookmaker_count >= 5, vig < 5%, implied_prob > 60%, odds >= 1.40
-- MEDIUM: bookmaker_count >= 3, vig 5-8%, implied_prob 45-60%
-- LOW:    thin coverage, vig > 8%, very close matchup
-
-RULES:
-- Max 5 picks per call
-- Never pick implied_prob_pct < 30%
-- If no clear value, skip and explain in skipped_matches
-
-CRITICAL: Respond ONLY with valid JSON. No markdown fences. No text outside JSON.
-
-Required schema:
-{
-  "analysis_summary": "2-3 sentence market overview",
-  "picks": [
-    {
-      "event_id":     "<from input>",
-      "sport_key":    "<from input>",
-      "sport_name":   "<from input>",
-      "match":        "<Team A vs Team B>",
-      "home_team":    "<home team>",
-      "away_team":    "<away team>",
-      "pick":         "<exact team name>",
-      "decimal_odds": <number>,
-      "implied_prob": <number e.g. 54.3>,
-      "confidence":   "HIGH" | "MEDIUM" | "LOW",
-      "rationale":    "<1-2 sentences>",
-      "commence_time":"<ISO8601 or empty>"
-    }
-  ],
-  "skipped_matches": ["<match>: <reason>"],
-  "disclaimer": "<one-line risk disclaimer>"
-}"""
+Output ONLY valid JSON, no fences:
+{"analysis_summary":"1 sentence","picks":[{"event_id":"","sport_key":"","sport_name":"","match":"A vs B","home_team":"","away_team":"","pick":"team name","decimal_odds":0.0,"implied_prob":0.0,"confidence":"HIGH","rationale":"1 sentence","commence_time":""}],"skipped_matches":[],"disclaimer":""}"""
 
 REPORT_SYSTEM = """You are Claude — writing a quantitative performance report for a sports betting bot.
 
@@ -450,6 +411,7 @@ async def claude_analyze(sport_key: str, sport_name: str, events: list) -> dict:
     """
     Core Claude analysis. Runs the blocking Anthropic call in a thread executor
     so it never freezes the async event loop while waiting for the API response.
+    Times out after 40s to prevent hanging.
     """
     if not events:
         return {
@@ -459,9 +421,10 @@ async def claude_analyze(sport_key: str, sport_name: str, events: list) -> dict:
             "disclaimer": "",
         }
 
+    # Compact JSON (no indent) to reduce token count in the prompt
     prompt = (
         f"Analyze these {sport_name} events (sport_key: {sport_key}).\n\n"
-        f"{json.dumps(events, indent=2)}\n\n"
+        f"{json.dumps(events, separators=(',', ':'))}\n\n"
         "Return ONLY the JSON schema from your system prompt. No other text."
     )
 
@@ -470,7 +433,7 @@ async def claude_analyze(sport_key: str, sport_name: str, events: list) -> dict:
         try:
             resp = anthropic_client.messages.create(
                 model="claude-sonnet-4-20250514",
-                max_tokens=2000,
+                max_tokens=800,          # was 2000 — 5 picks in JSON needs ~400-600 tokens
                 system=ANALYST_SYSTEM,
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -490,7 +453,14 @@ async def claude_analyze(sport_key: str, sport_name: str, events: list) -> dict:
             logger.error(f"Claude API error: {e}")
             return {"error": str(e), "picks": []}
 
-    return await asyncio.get_event_loop().run_in_executor(None, _blocking_call)
+    try:
+        return await asyncio.wait_for(
+            asyncio.get_event_loop().run_in_executor(None, _blocking_call),
+            timeout=40.0,
+        )
+    except asyncio.TimeoutError:
+        logger.error(f"claude_analyze timed out for {sport_key}")
+        return {"error": "timeout", "picks": []}
 
 
 async def claude_report(rows: list, period_label: str) -> str:
@@ -786,7 +756,7 @@ async def _do_recommend(msg):
     for sport_key, raw in zip(PRIORITY_SPORTS, raw_results):
         if isinstance(raw, Exception) or not raw:
             continue
-        events = preprocess_events(raw, limit=8)
+        events = preprocess_events(raw, limit=4)
         if not events:
             continue
         sport_name = TORN_SPORTS.get(sport_key, sport_key)
@@ -809,11 +779,22 @@ async def _do_recommend(msg):
         parse_mode="MarkdownV2",
     )
 
-    # Analyze all sports simultaneously
-    analysis_results = await asyncio.gather(
-        *[claude_analyze(sk, sn, ev) for sk, sn, ev in sports_to_analyze],
-        return_exceptions=True,
-    )
+    # Analyze all sports simultaneously — hard 50s timeout for the whole batch
+    try:
+        analysis_results = await asyncio.wait_for(
+            asyncio.gather(
+                *[claude_analyze(sk, sn, ev) for sk, sn, ev in sports_to_analyze],
+                return_exceptions=True,
+            ),
+            timeout=50.0,
+        )
+    except asyncio.TimeoutError:
+        await msg.edit_text(
+            "⏱ *Analysis timed out\\.*\n"
+            "Claude API is slow right now\\. Try again in a minute\\.",
+            parse_mode="MarkdownV2",
+        )
+        return
 
     all_picks     = []
     all_summaries = []
