@@ -1383,35 +1383,6 @@ async def cmd_watchstatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =============================================================================
-# RAILWAY HEALTH SERVER
-# =============================================================================
-
-async def health_handler(request: web.Request) -> web.Response:
-    pending = len(db_get_pending())
-    return web.json_response({
-        "status":          "ok",
-        "service":         "Torn Bookie Analyzer Bot v4",
-        "scanner_running": _scanner_running,
-        "alerted_events":  len(_alerted_ids),
-        "pending_bets":    pending,
-        "mode":            "webhook" if WEBHOOK_URL else "polling",
-        "time":            datetime.now(timezone.utc).isoformat(),
-    })
-
-
-async def run_health_server(port: int):
-    app_web = web.Application()
-    app_web.router.add_get("/",       health_handler)
-    app_web.router.add_get("/health", health_handler)
-    runner = web.AppRunner(app_web)
-    await runner.setup()
-    await web.TCPSite(runner, "0.0.0.0", port).start()
-    logger.info(f"Health server on :{port}")
-    while True:
-        await asyncio.sleep(3600)
-
-
-# =============================================================================
 # APP WIRING & MAIN
 # =============================================================================
 
@@ -1446,29 +1417,52 @@ def main():
     app = build_app()
 
     if WEBHOOK_URL:
-        WEBHOOK_PORT = PORT + 1
         webhook_path = f"/webhook/{TELEGRAM_TOKEN}"
         full_url     = f"{WEBHOOK_URL}{webhook_path}"
 
-        logger.info(f"Webhook mode | health:{PORT} | ptb:{WEBHOOK_PORT}")
+        logger.info(f"Webhook mode | port:{PORT}")
         logger.info(f"Webhook URL: {full_url}")
 
         async def run_all():
-            health_task = asyncio.create_task(run_health_server(PORT))
             await app.initialize()
             await app.bot.set_webhook(url=full_url, allowed_updates=Update.ALL_TYPES)
             await app.start()
-            app.run_webhook(
-                listen="0.0.0.0",
-                port=WEBHOOK_PORT,
-                url_path=webhook_path,
-                webhook_url=full_url,
-                allowed_updates=Update.ALL_TYPES,
-                close_loop=False,
-            )
+
+            aio_app = web.Application()
+
+            async def health_handler(request):
+                return web.json_response({
+                    "status":          "ok",
+                    "service":         "Torn Bookie Analyzer Bot v4",
+                    "scanner_running": _scanner_running,
+                    "alerted_events":  len(_alerted_ids),
+                    "pending_bets":    len(db_get_pending()),
+                    "mode":            "webhook",
+                    "time":            datetime.now(timezone.utc).isoformat(),
+                })
+
+            async def telegram_handler(request):
+                try:
+                    data = await request.json()
+                    update = Update.de_json(data, app.bot)
+                    await app.process_update(update)
+                except Exception as e:
+                    logger.error(f"Webhook handler error: {e}")
+                return web.Response(text="ok")
+
+            aio_app.router.add_get("/",           health_handler)
+            aio_app.router.add_get("/health",     health_handler)
+            aio_app.router.add_post(webhook_path,  telegram_handler)
+
+            runner = web.AppRunner(aio_app)
+            await runner.setup()
+            await web.TCPSite(runner, "0.0.0.0", PORT).start()
+            logger.info(f"Server on :{PORT} — health check + webhook active")
+
             try:
-                await health_task
+                await asyncio.Event().wait()
             finally:
+                await runner.cleanup()
                 await app.stop()
                 await app.shutdown()
 
