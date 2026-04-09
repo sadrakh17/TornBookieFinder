@@ -1,0 +1,13 @@
+[build]
+builder = "nixpacks"
+
+[deploy]
+startCommand = "python bot.py"
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 5
+
+[healthcheck]
+# Railway will check this port is accepting connections
+# The webhook server (python-telegram-bot) binds to $PORT automatically
+httpPath = "/"
+timeoutSeconds = 30
