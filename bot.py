@@ -807,24 +807,21 @@ async def _do_recommend(msg):
         if picks:
             all_picks.extend(picks)
             if summary:
-                all_summaries.append(
-                    f"*{_escape_md(sport_name)}:* {_escape_md(summary)}"
-                )
+                all_summaries.append(f"*{sport_name}:* {summary}")
 
     if not all_picks:
         await msg.edit_text(
-            "❌ No value bets found\\. Vig too high or markets closed\\.\n"
-            "Try /scan \\| Use /watchstart for continuous monitoring\\.",
-            parse_mode="MarkdownV2",
+            "❌ No value bets found. Vig too high or markets closed.\n"
+            "Try /scan | Use /watchstart for continuous monitoring.",
         )
         return
 
     saved = db_save_picks(all_picks)
-    now   = _escape_md(datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"))
+    now   = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     lines = [
         "🏆 *Claude's Top Picks*",
-        f"🕐 {now} \\| {events_scanned} events scanned",
+        f"🕐 {now} | {events_scanned} events scanned",
         "━━━━━━━━━━━━━━━━━━━━━━",
     ]
     lines.extend(all_summaries)
@@ -833,29 +830,29 @@ async def _do_recommend(msg):
 
     for i, p in enumerate(all_picks[:5], 1):
         te   = TIER_EMOJI.get(p.get("confidence", "LOW"), "⚪")
-        conf = _escape_md(p.get("confidence", ""))
-        mtch = _escape_md(p.get("match", ""))
-        pick = _escape_md(p.get("pick", ""))
+        conf = p.get("confidence", "")
+        mtch = p.get("match", "")
+        pick = p.get("pick", "")
         odds = p.get("decimal_odds", 0)
         prob = p.get("implied_prob", 0)
-        rat  = _escape_md(p.get("rationale", ""))
+        rat  = p.get("rationale", "")
         lines += [
-            f"{i}\\. {te} *{conf}* — {mtch}",
-            f"   Bet: *{pick}* @ {odds} \\({prob:.1f}% implied\\)",
+            f"{i}. {te} *{conf}* — {mtch}",
+            f"   Bet: *{pick}* @ {odds} ({prob:.1f}% implied)",
             f"   _{rat}_",
             "",
         ]
 
     lines += [
         "━━━━━━━━━━━━━━━━━━━━━━",
-        f"💾 *{saved} picks logged\\.* Use /resolve after matches\\.",
-        "📈 /report for win rate \\| /history for all picks",
+        f"💾 *{saved} picks logged.* Use /resolve after matches.",
+        "📈 /report for win rate | /history for all picks",
     ]
 
     text = "\n".join(lines)
     if len(text) > 4000:
-        text = text[:3950] + "\n_\\.\\.\\. /history for full list_"
-    await msg.edit_text(text, parse_mode="MarkdownV2")
+        text = text[:3950] + "\n_... /history for full list_"
+    await msg.edit_text(text, parse_mode="Markdown")
 
 
 async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -900,54 +897,50 @@ async def _run_analysis(target, sport_key: str, sport_name: str):
     disclaimer = result.get("disclaimer", "")
 
     if "error" in result and not picks:
-        await msg.edit_text(
-            f"❌ Claude error: {_escape_md(result['error'])}",
-            parse_mode="MarkdownV2",
-        )
+        await msg.edit_text(f"❌ Claude error: {result['error']}")
         return
 
     saved = db_save_picks(picks) if picks else 0
-    now   = _escape_md(datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"))
+    now   = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     lines = [
-        f"📊 *{_escape_md(sport_name)} Analysis*",
-        f"🕐 {now} \\| {len(events)} events",
+        f"📊 *{sport_name} Analysis*",
+        f"🕐 {now} | {len(events)} events",
         "━━━━━━━━━━━━━━━━━━━━━━",
     ]
     if summary:
-        lines += [f"_{_escape_md(summary)}_", ""]
+        lines += [f"_{summary}_", ""]
 
     if picks:
         for i, p in enumerate(picks, 1):
             te   = TIER_EMOJI.get(p.get("confidence", "LOW"), "⚪")
-            conf = _escape_md(p.get("confidence", ""))
-            mtch = _escape_md(p.get("match", ""))
-            pick = _escape_md(p.get("pick", ""))
+            conf = p.get("confidence", "")
+            mtch = p.get("match", "")
+            pick = p.get("pick", "")
             odds = p.get("decimal_odds", 0)
             prob = p.get("implied_prob", 0)
-            rat  = _escape_md(p.get("rationale", ""))
+            rat  = p.get("rationale", "")
             lines += [
-                f"{i}\\. {te} *{conf}* — {mtch}",
-                f"   Bet: *{pick}* @ {odds} \\({prob:.1f}%\\)",
+                f"{i}. {te} *{conf}* — {mtch}",
+                f"   Bet: *{pick}* @ {odds} ({prob:.1f}%)",
                 f"   _{rat}_",
                 "",
             ]
     else:
-        lines.append("_No strong value bets found in this market\\._")
+        lines.append("_No strong value bets found in this market._")
 
     if skipped:
-        sk = ", ".join(_escape_md(s) for s in skipped[:3])
-        lines.append(f"_Skipped: {sk}_")
+        lines.append(f"_Skipped: {', '.join(skipped[:3])}_")
 
     lines += [
         "━━━━━━━━━━━━━━━━━━━━━━",
-        f"💾 *{saved} picks logged\\.* _{_escape_md(disclaimer)}_",
+        f"💾 *{saved} picks logged.* _{disclaimer}_",
     ]
 
     text = "\n".join(lines)
     if len(text) > 4000:
-        text = text[:3950] + "\n_\\[truncated\\]_"
-    await msg.edit_text(text, parse_mode="MarkdownV2")
+        text = text[:3950] + "\n_[truncated]_"
+    await msg.edit_text(text, parse_mode="Markdown")
 
 
 async def cmd_resolve(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -963,12 +956,12 @@ async def cmd_resolve(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "✅ *Resolution Complete*",
             "━━━━━━━━━━━━━━━━━━━━━━",
             f"Resolved: *{r} bets*",
-            f"Still pending: *{p}* \\(match not finished\\)",
+            f"Still pending: *{p}* (match not finished)",
             "",
             "📈 /report to see updated win rate",
             "📋 /history to see individual outcomes",
         ]),
-        parse_mode="MarkdownV2",
+        parse_mode="Markdown",
     )
 
 
@@ -1090,31 +1083,31 @@ async def cmd_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         summary = result.get("analysis_summary", "")
 
         lines = [
-            f"📊 *{_escape_md(sport_name)}* \\| {len(events)} events \\| {saved} logged",
+            f"📊 *{sport_name}* | {len(events)} events | {saved} logged",
             "",
         ]
         if summary:
-            lines += [f"_{_escape_md(summary)}_", ""]
+            lines += [f"_{summary}_", ""]
         for i, p in enumerate(picks, 1):
             te   = TIER_EMOJI.get(p.get("confidence", "LOW"), "⚪")
-            conf = _escape_md(p.get("confidence", ""))
-            mtch = _escape_md(p.get("match", ""))
-            pick = _escape_md(p.get("pick", ""))
-            rat  = _escape_md(p.get("rationale", ""))
+            conf = p.get("confidence", "")
+            mtch = p.get("match", "")
+            pick = p.get("pick", "")
+            rat  = p.get("rationale", "")
             lines += [
-                f"{i}\\. {te} *{conf}* — {mtch}",
+                f"{i}. {te} *{conf}* — {mtch}",
                 f"   Bet *{pick}* @ {p.get('decimal_odds',0)} "
-                f"\\({p.get('implied_prob',0):.1f}%\\)",
+                f"({p.get('implied_prob',0):.1f}%)",
                 f"   _{rat}_",
                 "",
             ]
         if not picks:
-            lines.append("_No strong value bets found\\._")
+            lines.append("_No strong value bets found._")
 
         text = "\n".join(lines)
         if len(text) > 4000:
-            text = text[:3950] + "\n_\\[truncated\\]_"
-        await query.edit_message_text(text, parse_mode="MarkdownV2")
+            text = text[:3950] + "\n_[truncated]_"
+        await query.edit_message_text(text, parse_mode="Markdown")
 
     elif data == "recommend:all":
         await query.edit_message_text(
@@ -1129,17 +1122,17 @@ async def cmd_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =============================================================================
 
 def _format_alert(pick: dict) -> str:
-    """Build a MarkdownV2-safe push-alert message for one high-value pick."""
+    """Build a push-alert message for one high-value pick (plain Markdown)."""
     te    = TIER_EMOJI.get(pick.get("confidence", "LOW"), "⚪")
-    conf  = _escape_md(pick.get("confidence", ""))
-    sport = _escape_md(pick.get("sport_name", ""))
-    mtch  = _escape_md(pick.get("match", ""))
-    pick_ = _escape_md(pick.get("pick", ""))
+    conf  = pick.get("confidence", "")
+    sport = pick.get("sport_name", "")
+    mtch  = pick.get("match", "")
+    pick_ = pick.get("pick", "")
     odds  = pick.get("decimal_odds", 0)
     prob  = pick.get("implied_prob", 0.0)
-    rat   = _escape_md(pick.get("rationale", ""))
+    rat   = pick.get("rationale", "")
     ct    = pick.get("commence_time", "")
-    start = _escape_md((ct[:16].replace("T", " ") + " UTC") if ct else "TBD")
+    start = (ct[:16].replace("T", " ") + " UTC") if ct else "TBD"
 
     return "\n".join([
         f"🚨 *BOOKIE ALERT* {te} {conf}",
@@ -1147,11 +1140,11 @@ def _format_alert(pick: dict) -> str:
         f"🏆 *{sport}*",
         f"⚔️  {mtch}",
         f"✅ Bet: *{pick_}*",
-        f"📊 Odds: *{odds}* \\({prob:.1f}% implied\\)",
+        f"📊 Odds: *{odds}* ({prob:.1f}% implied)",
         f"🕐 Starts: {start}",
         f"💡 _{rat}_",
         "━━━━━━━━━━━━━━━━━━━━━━",
-        "_Auto\\-logged\\. Use /resolve after match\\._",
+        "_Auto-logged. Use /resolve after match._",
     ])
 
 
